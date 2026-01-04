@@ -1,0 +1,16 @@
+[Unit]
+Description=Grok 4 Trading Bot
+After=network.target
+
+[Service]
+# IMPORTANT: Adjust User and WorkingDirectory to match your VM setup
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grokTrading
+Environment=PYTHONPATH=/home/ubuntu/grokTrading
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/grokTrading/venv/bin/python src/live_main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

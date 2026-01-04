@@ -1,0 +1,10 @@
+yfinance
+pandas
+openai
+python-dotenv
+termcolor
+tqdm
+alpaca-py
+ddgs
+supabase
+numpy
