@@ -10,6 +10,7 @@ from termcolor import colored
 
 from src.data.alpaca_market import AlpacaMarket
 from src.data.news import NewsData
+from src.data.options_data import get_sweeps_data
 from src.portfolio.alpaca_portfolio import AlpacaPortfolio
 from src.agent.grok_agent import GrokTrader
 import src.analysis.indicators as indicators
@@ -30,6 +31,7 @@ class LiveTrader:
             self.market = AlpacaMarket()
             self.portfolio = AlpacaPortfolio()
             self.news = NewsData()
+            self.sweeps = get_sweeps_data()  # Options sweeps data
             self.agent = GrokTrader(model_name="grok-4-1-fast-reasoning")
             self.journal = TradingJournal()
             self.notes = TradingNotes()
@@ -114,7 +116,7 @@ class LiveTrader:
 
             
             system_prompt = (
-                "You are Grok, an elite AI trader specializing in technical analysis for U.S. equities. "
+                "You are Grok, an elite AI trader specializing in technical analysis for U.S. equities AND stock options. "
                 "You are operating a live trading bot (paper trading) with Alpaca integration.\n\n"
 
                 "OBJECTIVE\n"
@@ -130,35 +132,53 @@ class LiveTrader:
                 "- Cooldown: 30-minute lockout after selling a ticker (prevent churn).\n"
                 "- No selling more shares than you hold.\n\n"
 
-                "TOOLS AVAILABLE\n"
+                "STOCK TRADING TOOLS\n"
                 "- `scan_market_movers(sort_by)`: Get top gainers/losers/vol from your Universe.\n"
                 "- `get_technical_indicators(ticker)`: Get RSI, SMA, Trend for a ticker.\n"
                 "- `calculate_risk_size(ticker, stop_loss_pct)`: Get exact share count for risk management.\n"
                 "- `search_web(query)`: Look up news/catalysts.\n"
                 "- `update_position_thesis(ticker, thesis, ...)`: Save your plan before entering.\n"
-                "- `update_shared_notes(content)`: Update global strategy.\n"
-                "- `place_trade_orders(trades)`: Execute orders.\n\n"
+                "- `update_shared_notes(content)`: Overwrite global strategy with a concise summary.\n"
+                "- `place_trade_orders(trades)`: Execute stock orders.\n\n"
+                
+                "OPTIONS TRADING TOOLS (NEW!)\n"
+                "- `get_active_sweeps(ticker?, limit?)`: Get institutional options flow from Discord signals. Large premium sweeps often indicate smart money direction.\n"
+                "- `get_option_price(ticker, expiration, strike, call_put)`: Get current mid price + Greeks (IV, delta, gamma, theta).\n"
+                "- `get_option_chain(ticker, expiration?)`: Get full option chain with top contracts by volume.\n\n"
 
                 "DECISION PROCESS (FOLLOW THIS ORDER)\n"
-                "1) **Scan**: Use `scan_market_movers` to find candidates OR check `Active Theses` for management.\n"
-                "2) **Verify**: Call `get_technical_indicators` for your top 1-3 candidates.\n"
-                "3) **Plan Risk**: If entering new position, call `calculate_risk_size` to find the safe share count.\n"
-                "4) **Lock Thesis**: If entering, call `update_position_thesis` to save your reasoning/targets.\n"
+                "1) **Scan**: Use `scan_market_movers` OR `get_active_sweeps` to find candidates.\n"
+                "2) **Verify**: Call `get_technical_indicators` for stocks, `get_option_price` for options.\n"
+                "3) **Plan Risk**: Call `calculate_risk_size` for stocks. For options, check delta/theta decay.\n"
+                "4) **Lock Thesis**: Call `update_position_thesis` to save reasoning/targets.\n"
                 "5) **Execute**: Call `place_trade_orders` (only if indicators confirm setup).\n\n"
 
-                "STRATEGY GUIDELINES\n"
-                "- Bullish Regime: Aggressive on pullbacks (RSI < 40). Look for Gainers with high volume.\n"
+                "OPTIONS STRATEGY GUIDELINES\n"
+                "- **Follow the Sweeps**: Large premium sweeps (>$500K) often signal institutional conviction.\n"
+                "- **Delta Rule**: For directional plays, prefer delta 0.30-0.50 for balance of leverage and probability.\n"
+                "- **Theta Decay**: Avoid holding options <7 DTE unless you have strong conviction.\n"
+                "- **IV Awareness**: High IV = expensive options. Post-earnings IV crush can hurt long positions.\n"
+                "- **Greeks Check**: Always verify delta, theta before entering. High gamma near expiry = high risk.\n\n"
+
+                "STOCK STRATEGY GUIDELINES\n"
+                "- Bullish Regime: Aggressive on pullbacks (RSI < 40). Look for Price > VWAP confirmation.\n"
                 "- Bearish Regime: Defensive. Cash is a position. Short rallies (if permitted) or buy deep dips.\n"
+                "- **VWAP Rule**: Avoid buying if Price is > 3% above VWAP (chasing). Prefer entries near VWAP support.\n"
+                "- **News Rule**: Before trading big movers, call `search_web` with specific queries like '{ticker} stock catalyst today'.\n"
                 "- **Never trade blindly**. You must see the chart data first.\n\n"
 
                 "JOURNALING REQUIREMENT\n"
-                "- Every trade MUST include a concise `reason` referencing fetched data (e.g. \"RSI 35, support at 200 SMA\").\n\n"
+                "- Every trade MUST include a concise `reason` referencing fetched data (e.g. \"RSI 35, support at 200 SMA\" or \"Large call sweep $1.2M, delta 0.45\").\n\n"
 
                 "RECENT TRADES:\n"
                 f"{recent_trades}\n\n"
 
                 "SHARED NOTES (Strategy Context):\n"
                 f"{strategy_notes}\n\n"
+                "NOTE MAINTENANCE RULE:\n"
+                "- Do NOT append individual trade logs or price history to Shared Notes.\n"
+                "- Maintain a concise 3-5 bullet summary of your CURRENT stance (e.g., 'Bullish, buying dips in semi-conductors').\n"
+                "- Use 'overwrite' mode to clear old stale data.\n\n"
 
                 "ACTIVE THESES (Do not violate these):\n"
                 f"{active_theses}\n\n"
@@ -178,6 +198,7 @@ class LiveTrader:
             self.run_agent_loop(system_prompt, user_prompt)
             
             # Wait for next cycle
+            self.logger.info(colored(f"Cycle complete. Sleeping for {self.poll_interval // 60} minutes...", "yellow"))
             for _ in range(self.poll_interval):
                 if not self.running: break
                 time.sleep(1)
@@ -316,21 +337,74 @@ class LiveTrader:
                 "type": "function",
                 "function": {
                     "name": "update_shared_notes",
-                    "description": "Update the persistent strategy notes. Use this to refine your strategy or leave notes for next cycle.",
+                    "description": "Overwrite the global strategy notes. maintain a CONCISE summary of the market regime and current plan.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "The FULL new content of the notes (this overwrites existing notes, so include old important stuff if needed, or just append)."
+                                "description": "The new summary note (e.g. 'Market is oversold, looking for tech bounces'). Replaces old notes."
                             },
                             "mode": {
                                 "type": "string",
                                 "enum": ["overwrite", "append"],
-                                "description": "Whether to replace all notes or just add to the end."
+                                "description": "Always use 'overwrite' to keep notes clean, unless adding a critical specific alert."
                             }
                         },
                         "required": ["content", "mode"]
+                    }
+                }
+            },
+            # ===== OPTIONS TRADING TOOLS =====
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_active_sweeps",
+                    "description": "Get active options sweeps from Discord signals (large institutional flow). Returns list of contracts with ticker, strike, expiration, call/put, premium.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {
+                                "type": "string",
+                                "description": "Optional: Filter sweeps by ticker symbol. Leave empty for all active sweeps."
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max number of sweeps to return (default 10)"
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_option_price",
+                    "description": "Get current mid price and Greeks (IV, delta, gamma, theta) for a specific option contract.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "Stock symbol (e.g., AAPL)"},
+                            "expiration": {"type": "string", "description": "Expiration date in MM/DD/YYYY format"},
+                            "strike": {"type": "number", "description": "Strike price"},
+                            "call_put": {"type": "string", "enum": ["Call", "Put"], "description": "Option type"}
+                        },
+                        "required": ["ticker", "expiration", "strike", "call_put"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_option_chain",
+                    "description": "Get full option chain (calls and puts) for a ticker. Use to analyze available strikes and expirations.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "Stock symbol"},
+                            "expiration": {"type": "string", "description": "Optional: Specific expiration (MM/DD/YYYY). If omitted, returns next 30 days."}
+                        },
+                        "required": ["ticker"]
                     }
                 }
             }
@@ -356,7 +430,7 @@ class LiveTrader:
                         ind = indicators.calculate_indicators(hist)
                         data = indicators.get_latest_indicators(ind)
                         res_content = json.dumps(data)
-                        self.logger.info(f"  > Analysis {ticker}: RSI={data['rsi']}, Trend={data['trend']}")
+                        self.logger.info(f"  > Analysis {ticker}: RSI={data['rsi']}, VWAP=${data.get('vwap',0)}, Trend={data['trend']}")
                     else:
                         res_content = "Data unavailable"
                         
@@ -477,6 +551,89 @@ class LiveTrader:
                     self.cloud_log.info("Strategy Notes Updated", {"mode": mode, "preview": content[:100]})
                         
                     res_content = "Strategy notes updated."
+                
+                # ===== OPTIONS TRADING TOOL HANDLERS =====
+                elif fname == "get_active_sweeps":
+                    ticker = args.get('ticker', '').upper() if args.get('ticker') else None
+                    limit = int(args.get('limit', 10))
+                    
+                    if ticker:
+                        sweeps = self.sweeps.get_sweeps_by_ticker(ticker)
+                    else:
+                        sweeps = self.sweeps.get_active_sweeps(limit=limit)
+                    
+                    # Format for agent consumption
+                    formatted = []
+                    for s in sweeps[:limit]:
+                        formatted.append({
+                            'id': s['id'],
+                            'ticker': s['ticker'],
+                            'strike': s['strike'],
+                            'type': s['call_put'],
+                            'expiration': s['expiration'],
+                            'premium': s['premium'],
+                            'orders': s['orders'],
+                            'signal_price': s.get('option_price_at_signal')
+                        })
+                    
+                    res_content = json.dumps(formatted, indent=2)
+                    self.logger.info(colored(f"  > Active Sweeps: Found {len(formatted)} contracts", "cyan"))
+                
+                elif fname == "get_option_price":
+                    ticker = args['ticker'].upper()
+                    expiration = args['expiration']
+                    strike = float(args['strike'])
+                    call_put = args['call_put']
+                    
+                    price_data = self.sweeps.get_option_price(ticker, expiration, strike, call_put)
+                    
+                    if price_data:
+                        res_content = json.dumps({
+                            'ticker': ticker,
+                            'strike': strike,
+                            'type': call_put,
+                            'expiration': expiration,
+                            'mid': price_data.get('mid'),
+                            'last': price_data.get('last'),
+                            'iv': price_data.get('iv'),
+                            'delta': price_data.get('delta'),
+                            'gamma': price_data.get('gamma'),
+                            'theta': price_data.get('theta'),
+                            'vega': price_data.get('vega')
+                        })
+                        self.logger.info(colored(
+                            f"  > Option Price {ticker} {strike} {call_put}: Mid=${price_data.get('mid')}, Delta={price_data.get('delta')}", 
+                            "cyan"
+                        ))
+                    else:
+                        res_content = json.dumps({"error": "Could not fetch option price. Schwab may not be authenticated."})
+                        self.logger.warning(f"  > Failed to fetch option price for {ticker}")
+                
+                elif fname == "get_option_chain":
+                    ticker = args['ticker'].upper()
+                    expiration = args.get('expiration')
+                    
+                    chain = self.sweeps.get_option_chain(ticker, expiration)
+                    
+                    if chain.get('error'):
+                        res_content = json.dumps({"error": chain['error']})
+                        self.logger.warning(f"  > Option chain error: {chain['error']}")
+                    else:
+                        # Summarize for agent (limit to top 10 each by volume)
+                        calls = sorted(chain.get('calls', []), key=lambda x: x.get('volume') or 0, reverse=True)[:10]
+                        puts = sorted(chain.get('puts', []), key=lambda x: x.get('volume') or 0, reverse=True)[:10]
+                        
+                        res_content = json.dumps({
+                            'ticker': ticker,
+                            'top_calls': calls,
+                            'top_puts': puts,
+                            'total_calls': len(chain.get('calls', [])),
+                            'total_puts': len(chain.get('puts', []))
+                        }, indent=2)
+                        self.logger.info(colored(
+                            f"  > Option Chain {ticker}: {len(chain.get('calls', []))} calls, {len(chain.get('puts', []))} puts",
+                            "cyan"
+                        ))
                     
             except Exception as e:
                 res_content = f"Tool Error: {e}"

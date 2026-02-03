@@ -11,6 +11,10 @@ class RiskManager:
         self.max_position_pct = 0.20 # 20% max allocation per ticker
         self.last_trade_times = {} # {ticker: datetime}
         self.cooldown_minutes = 30
+        
+        # Options-specific constraints
+        self.max_options_pct = 0.05  # 5% of portfolio per option contract
+        self.min_dte = 7  # Warn if option expiration is < 7 days
 
     def validate_order(self, ticker: str, action: str, shares: int) -> Tuple[bool, str]:
         """
@@ -65,3 +69,49 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"Risk Validation Error: {e}")
             return False, f"Risk Validation Error: {e}"
+    
+    def validate_option_order(self, ticker: str, strike: float, expiration: str, 
+                               call_put: str, contracts: int, premium: float) -> Tuple[bool, str]:
+        """
+        Validates options-specific risk rules.
+        Returns (is_valid, rejection_reason or warning).
+        """
+        try:
+            portfolio_val = self.portfolio.get_total_value()
+            cash = self.portfolio.get_cash()
+            
+            # Calculate notional (premium * 100 shares per contract)
+            notional_value = premium * 100 * contracts
+            
+            # 1. Cash check
+            if notional_value > cash:
+                return False, f"Insufficient cash (${cash:.2f}) for option order (${notional_value:.2f})"
+            
+            # 2. Max options allocation check
+            max_allowed = portfolio_val * self.max_options_pct
+            if notional_value > max_allowed:
+                return False, f"Options position ${notional_value:.2f} exceeds max {self.max_options_pct*100}% allocation (${max_allowed:.2f})"
+            
+            # 3. DTE check (warning, not rejection)
+            warning = ""
+            try:
+                parts = expiration.split('/')
+                exp_date = datetime(int(parts[2]) if int(parts[2]) > 100 else 2000 + int(parts[2]), 
+                                   int(parts[0]), int(parts[1]))
+                dte = (exp_date - datetime.now()).days
+                
+                if dte < self.min_dte:
+                    warning = f"WARNING: Option expires in {dte} days (< {self.min_dte} DTE threshold). High theta decay risk."
+            except:
+                pass
+            
+            result_msg = "Option Trade Approved"
+            if warning:
+                result_msg += f" | {warning}"
+            
+            return True, result_msg
+
+        except Exception as e:
+            self.logger.error(f"Option Risk Validation Error: {e}")
+            return False, f"Option Risk Validation Error: {e}"
+
